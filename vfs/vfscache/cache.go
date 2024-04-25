@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/rclone/rclone/fs/filter"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -61,7 +63,7 @@ type Cache struct {
 	cleanerKicked bool             // some thread kicked the cleaner upon out of space
 	kickerMu      sync.Mutex       // mutex for cleanerKicked
 	kick          chan struct{}    // channel for kicking clear to start
-
+	vipRules      []*regexp.Regexp
 }
 
 // AddVirtualFn if registered by the WithAddVirtual method, can be
@@ -113,6 +115,14 @@ func New(ctx context.Context, fremote fs.Fs, opt *vfscommon.Options, avFn AddVir
 	}
 	hashType, hashOption := operations.CommonHash(ctx, fdata, fremote)
 
+	var vipRules []*regexp.Regexp
+	if opt.CacheVip != "" {
+		fs.Infof(nil, "vfs cache: VIP cache: %q, %s", opt.CacheVip, opt.CacheVipMaxSize)
+		rule, err := filter.GlobToRegexp(opt.CacheVip, true)
+		if err == nil {
+			vipRules = append(vipRules, rule)
+		}
+	}
 	// Create the cache object
 	c := &Cache{
 		fremote:    fremote,
@@ -127,6 +137,7 @@ func New(ctx context.Context, fremote fs.Fs, opt *vfscommon.Options, avFn AddVir
 		hashOption: hashOption,
 		writeback:  writeback.New(ctx, opt),
 		avFn:       avFn,
+		vipRules:   vipRules,
 	}
 
 	// load in the cache and metadata off disk
@@ -621,7 +632,7 @@ func (c *Cache) purgeClean() {
 
 	// Make a slice of clean cache files
 	for _, item := range c.item {
-		if !item.IsDirty() {
+		if !item.IsDirty() && !c.isVip(item) {
 			items = append(items, item)
 		}
 	}
@@ -647,6 +658,32 @@ func (c *Cache) purgeClean() {
 		}
 	}
 
+	items = nil
+	for _, item := range c.item {
+		if !item.IsDirty() && c.isVip(item) {
+			items = append(items, item)
+		}
+	}
+	sort.Sort(items)
+	// Reset vip items until the quota is OK
+	for _, item := range items {
+		if c.quotasOK() {
+			break
+		}
+		resetResult, spaceFreed, err := item.Reset()
+		// The item space might be freed even if we get an error after the cache file is removed
+		// The item will not be removed or reset if the cache data is dirty (DataDirty)
+		c.used -= spaceFreed
+		fs.Infof(nil, "vfs cache purgeClean vip item.Reset %s: %s, freed %d bytes", item.GetName(), resetResult.String(), spaceFreed)
+		if resetResult == RemovedNotInUse {
+			delete(c.item, item.name)
+		}
+		if err != nil {
+			fs.Errorf(nil, "vfs cache purgeClean vip item.Reset %s reset failed, err = %v, freed %d bytes", item.GetName(), err, spaceFreed)
+			c.errItems[item.name] = err
+		}
+	}
+
 	// Reset outOfSpace without checking whether we have reduced cache space below the quota.
 	// This allows some files to reduce their pendingAccesses count to allow them to be reset
 	// in the next iteration of the purge cleaner loop.
@@ -660,7 +697,13 @@ func (c *Cache) purgeOld(maxAge time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// cutoff := time.Now().Add(-maxAge)
+	// 在这里实现, 小文件(nfo, ass, png, 等等)不删除/缓存更长的时间
 	for _, item := range c.item {
+		if c.isVip(item) {
+			// 忽略
+			fs.Debugf(nil, "vfs vip cache file, %s, %s", item.name, item.info.ATime)
+			continue
+		}
 		c.removeNotInUse(item, maxAge, false)
 	}
 	if c.quotasOK() {
@@ -733,6 +776,24 @@ func (c *Cache) haveQuotas() bool {
 	return c.opt.CacheMaxSize > 0 || c.opt.CacheMinFreeSpace > 0
 }
 
+// Return true if any quotas set
+func (c *Cache) isVip(item *Item) bool {
+	if c.vipRules == nil {
+		return false
+	}
+
+	if c.opt.CacheVipMaxSize != -1 && int64(c.opt.CacheVipMaxSize) < item.info.Size {
+		return false
+	}
+
+	for _, rule := range c.vipRules {
+		if rule.MatchString(item.name) {
+			return true
+		}
+	}
+	return false
+}
+
 // Remove clean cache files that are not open until the total space
 // is reduced below quota starting from the oldest first
 func (c *Cache) purgeOverQuota() {
@@ -749,7 +810,7 @@ func (c *Cache) purgeOverQuota() {
 
 	// Make a slice of unused files
 	for _, item := range c.item {
-		if !item.inUse() {
+		if !item.inUse() && !c.isVip(item) {
 			items = append(items, item)
 		}
 	}

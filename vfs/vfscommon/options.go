@@ -29,6 +29,8 @@ type Options struct {
 	CacheMaxSize       fs.SizeSuffix
 	CacheMinFreeSpace  fs.SizeSuffix
 	CachePollInterval  time.Duration
+	CacheVip           string
+	CacheVipMaxSize    fs.SizeSuffix
 	CaseInsensitive    bool
 	BlockNormDupes     bool
 	WriteWait          time.Duration // time to wait for in-sequence write
@@ -57,6 +59,8 @@ var DefaultOpt = Options{
 	CacheMode:          CacheModeOff,
 	CacheMaxAge:        3600 * time.Second,
 	CachePollInterval:  60 * time.Second,
+	CacheVip:           "",
+	CacheVipMaxSize:    -1,
 	ChunkSize:          128 * fs.Mebi,
 	ChunkSizeLimit:     -1,
 	CacheMaxSize:       -1,
