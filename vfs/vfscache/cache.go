@@ -778,16 +778,23 @@ func (c *Cache) haveQuotas() bool {
 
 // Return true if any quotas set
 func (c *Cache) isVip(item *Item) bool {
+	if !item.vip {
+		return false
+	}
+	if c.opt.CacheVipMaxSize != -1 && int64(c.opt.CacheVipMaxSize) < item.info.Size {
+		return false
+	}
+	return true
+}
+
+// Return true if any quotas set
+func (c *Cache) matchVipRule(filename string) bool {
 	if c.vipRules == nil {
 		return false
 	}
 
-	if c.opt.CacheVipMaxSize != -1 && int64(c.opt.CacheVipMaxSize) < item.info.Size {
-		return false
-	}
-
 	for _, rule := range c.vipRules {
-		if rule.MatchString(item.name) {
+		if rule.MatchString(filename) {
 			return true
 		}
 	}

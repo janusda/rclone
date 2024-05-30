@@ -68,6 +68,7 @@ type Item struct {
 	pendingAccesses int                      // number of threads - cache reset not allowed if not zero
 	modified        bool                     // set if the file has been modified since the last Open
 	beingReset      bool                     // cache cleaner is resetting the cache file, access not allowed
+	vip             bool                     // set if the file is a vip object
 }
 
 // Info is persisted to backing store
@@ -133,6 +134,7 @@ func newItem(c *Cache, name string) (item *Item) {
 	item = &Item{
 		c:    c,
 		name: name,
+		vip:  c.matchVipRule(name),
 		info: Info{
 			ModTime: now,
 			ATime:   now,
